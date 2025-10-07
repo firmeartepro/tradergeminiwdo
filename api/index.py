@@ -29,9 +29,10 @@ def inicializar_servicos():
     """Carrega o modelo e inicializa o cliente Supabase."""
     global model_ia, supabase
     
-    # Carrega Modelo
+   # Carrega Modelo
     try:
-        model_ia = tf.keras.models.load_model('ia_wdo_v1_ticks.h5')
+        # CORREÇÃO: Usando compile=False para evitar erros de compatibilidade no Vercel
+        model_ia = tf.keras.models.load_model('ia_wdo_v1_ticks.h5', compile=False) 
     except Exception as e:
         print(f"ERRO ao carregar o modelo: {e}")
         
