@@ -1,0 +1,6 @@
+tensorflow
+numpy
+pandas
+pandas-ta
+flask
+supabase-py
