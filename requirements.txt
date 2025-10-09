@@ -1,7 +1,6 @@
-tensorflow
+tensorflow==2.10.0
 numpy
 pandas
 pandas-ta
 flask
-supabase-py 
-gunicorn
+supabase
