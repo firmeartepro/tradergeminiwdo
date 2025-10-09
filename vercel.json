@@ -1,1 +1,8 @@
-[Immersive content redacted for brevity.]
+{
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api"
+    }
+  ]
+}
