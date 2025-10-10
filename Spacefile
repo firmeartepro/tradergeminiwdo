@@ -1,0 +1,13 @@
+micro:
+  - name: trader-signals
+    src: .
+    engine: python
+    include:
+      - main.py
+      - ia_wdo_v1_ticks.h5
+      - requirements.txt
+    public: true
+    http_methods:
+      - GET
+      - POST
+    serve: main
