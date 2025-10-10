@@ -1,3 +1,4 @@
+Versão 3.10 do Python é fixada em runtime.txt para compatibilidade com TensorFlow
 tensorflow==2.10.0
 numpy
 pandas
