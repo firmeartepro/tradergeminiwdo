@@ -1,145 +1,182 @@
-# api/index.py
+# Importa bibliotecas essenciais
 import os
+import json
+import time
 from flask import Flask, request, jsonify
-import tensorflow as tf
+from supabase import create_client, Client
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
-from supabase import create_client, Client
+import tensorflow as tf
+from keras.models import load_model
 
+# --- Configurações Globais ---
+# A aplicação Flask
 app = Flask(__name__)
 
-# --- CONFIGURAÇÕES SUPABASE (Lidas de Secrets do Vercel) ---
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-SUPABASE_TABLE = "wdo_trade_logs"
+# Variáveis globais para o modelo e serviços
+model = None
+db_client = None
 
-# --- CONFIGURAÇÕES DO MODELO ---
-THRESHOLD_COMPRA = 0.60
-COLUNAS_INDICADORES = [
-    'RSI_14', 'MACDh_12_26_9', 'ADX_14', 'CCI_14_0.015', 
-    'BBP_5_2.0', 'BBL_5_2.0', 'ATR_14'
-]
+# Configurações do modelo
+MODEL_PATH = 'ia_wdo_v1_ticks.h5'
+TIME_STEP = 300
+SCALER_RANGE = (0, 1)
 
-model_ia = None
-supabase: Client = None
+# --- Funções de Inicialização ---
+
+def inicializar_modelo():
+    """Carrega o modelo Keras/TensorFlow a partir do arquivo H5."""
+    global model
+    try:
+        # Garante que o TensorFlow só use a CPU no ambiente serverless
+        # Para evitar problemas de compatibilidade com GPU
+        tf.config.set_visible_devices([], 'GPU')
+        
+        # Carrega o modelo
+        model = load_model(MODEL_PATH)
+        print("Modelo de IA carregado com sucesso.")
+        return True
+    except Exception as e:
+        print(f"ERRO ao carregar o modelo de IA: {e}")
+        return False
 
 def inicializar_servicos():
-    """Carrega o modelo e inicializa o cliente Supabase. Executado no cold start."""
-    global model_ia, supabase
-    
-    # Carrega Modelo
+    """Inicializa a conexão com o Supabase."""
+    global db_client
     try:
-        # Usando compile=False para evitar erros de compatibilidade e acelerar o carregamento
-        print("Iniciando carregamento do modelo ia_wdo_v1_ticks.h5...")
-        model_ia = tf.keras.models.load_model('ia_wdo_v1_ticks.h5', compile=False) 
-        print("Modelo carregado com sucesso.")
-    except Exception as e:
-        print(f"ERRO ao carregar o modelo: {e}")
+        # As variáveis de ambiente devem ser configuradas no painel do Deta Space
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_KEY")
         
-    # Inicializa Supabase
-    if SUPABASE_URL and SUPABASE_KEY:
-        try:
-            print("Inicializando cliente Supabase...")
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            print("Supabase inicializado.")
-        except Exception as e:
-            print(f"ERRO ao inicializar Supabase: {e}")
+        if not url or not key:
+            print("AVISO: Variáveis SUPABASE_URL ou SUPABASE_KEY não encontradas. Logs desativados.")
+            return False
 
-# O modelo e o Supabase são carregados na inicialização do worker (cold start)
-inicializar_servicos()
+        db_client = create_client(url, key)
+        print("Conexão Supabase inicializada.")
+        return True
+    except Exception as e:
+        print(f"ERRO ao conectar ao Supabase: {e}")
+        return False
 
-
-def preparar_input_ia(historico: pd.DataFrame):
-    """Calcula os 7 indicadores e retorna o array para previsão e os valores para log."""
-    df = historico[['open', 'high', 'low', 'close', 'tick_volume']].copy()
-    
-    # Cálculo dos Indicadores (Garantindo que a coluna 'close' exista para o pandas_ta)
-    df.ta.bbands(close='close', length=5, append=True) 
-    df.ta.atr(length=14, append=True)
-    df.ta.rsi(length=14, append=True)
-    df.ta.macd(fast=12, slow=26, signal=9, append=True)
-    df.ta.adx(length=14, slow=9, append=True) # ADX precisa de um valor para o 'slow'
-    df.ta.cci(length=14, append=True)
-
-    # Renomeia o CCI para coincidir com o que o modelo espera
-    df = df.rename(columns={'CCI_14_0.015': 'CCI_14_0.015'})
-    
-    df_input = df[COLUNAS_INDICADORES].iloc[-1].fillna(0) 
-    X_pred = df_input.values.reshape(1, -1)
-    return X_pred, df_input 
-
-
-def log_trade_data(timestamp_log, indicadores_df, probability, sinal):
-    """Salva os dados brutos da predição no Supabase."""
-    if supabase is None:
-        print("Aviso: Supabase não inicializado. Não foi possível logar.")
+def registrar_sinal(data, prediction_value, signal_time):
+    """Salva o log do sinal no Supabase."""
+    if not db_client:
+        print("Supabase não conectado. Log não realizado.")
         return
 
-    # Mapeia os dados para as colunas da tabela 'wdo_trade_logs'
-    # ATENÇÃO: Os nomes das chaves (keys) precisam bater exatamente com as colunas da sua tabela!
-    data_to_insert = {
-        "timestamp": timestamp_log,
-        "probability": probability,
-        "signal": sinal,
-        "rsi_14": float(indicadores_df['RSI_14']), 
-        "macdh_12_26_9": float(indicadores_df['MACDh_12_26_9']),
-        "adx_14": float(indicadores_df['ADX_14']),
-        "cci_14_0_015": float(indicadores_df['CCI_14_0.015']), # Mapeando para o nome de coluna (sem ponto)
-        "bbp_5_2_0": float(indicadores_df['BBP_5_2.0']),
-        "bbl_5_2_0": float(indicadores_df['BBL_5_2.0']),
-        "atr_14": float(indicadores_df['ATR_14'])
-    }
-
     try:
-        # Usando insert().execute() para executar a query
-        supabase.table(SUPABASE_TABLE).insert(data_to_insert).execute()
-        print(f"Log de trade inserido: {sinal} ({probability:.4f})")
-    except Exception as e:
-        print(f"ERRO ao logar no Supabase: {e}")
+        data_to_log = {
+            "timestamp": int(time.time()),
+            "sinal_mt5": data.get("Signal"),
+            "prediction_ia": prediction_value,
+            "candle_time": signal_time,
+            "data_recebida": data 
+        }
+        
+        # O nome da tabela deve ser ajustado para a sua configuração do Supabase
+        # Usaremos 'sinais_wdo' como padrão
+        response = db_client.table("sinais_wdo").insert(data_to_log).execute()
+        print(f"Sinal registrado com sucesso: {response.data}")
 
+    except Exception as e:
+        print(f"ERRO ao registrar sinal no Supabase: {e}")
+
+# --- Endpoint da API ---
 
 @app.route('/', methods=['GET'])
 def health_check():
-    """Endpoint de verificação de saúde (Health Check)."""
-    return jsonify({
-        "status": "OK", 
-        "message": "API de sinais WDO online."
-    }), 200
+    """Verificação de saúde simples. Deve retornar OK."""
+    if model and db_client:
+        return jsonify({"status": "OK", "message": "API pronta e conectada ao Supabase."}), 200
+    elif model:
+        return jsonify({"status": "OK", "message": "API pronta, modelo carregado, Supabase desconectado."}), 200
+    else:
+        return jsonify({"status": "ERROR", "message": "API offline ou modelo não carregado."}), 500
 
+@app.route('/', methods=['POST'])
+def processar_dados():
+    """Recebe os dados do MT5 e retorna a previsão da IA."""
+    global model
 
-@app.route('/signal', methods=['POST'])
-def get_signal():
-    """Endpoint principal para receber os dados e retornar o sinal."""
-    if model_ia is None:
-        return jsonify({"sinal": "ERRO", "mensagem": "Modelo não carregado na API"}), 500
-        
+    if not model:
+        return jsonify({"Error": "Modelo de IA não carregado na API."}), 503
+
     try:
-        data = request.json
-        historico = pd.DataFrame(data['candles'])
-        historico = historico.rename(columns={'volume': 'tick_volume'})
+        # 1. Recebe os dados do MT5 (JSON)
+        dados = request.get_json(force=True)
         
-        # 1. Prepara o Input e Calcula Indicadores
-        X_pred, indicadores_df = preparar_input_ia(historico)
+        # 2. Extrai e valida a lista de preços
+        precos_str = dados.get('Prices')
+        if not precos_str:
+            return jsonify({"Error": "Campo 'Prices' não encontrado nos dados."}), 400
+
+        # Converte a string de preços (separada por vírgulas) para uma lista de floats
+        precos = [float(p) for p in precos_str.split(',') if p]
+
+        # 3. Verifica o tamanho da série temporal
+        if len(precos) < TIME_STEP:
+            return jsonify({"Error": f"Série temporal incompleta. Esperado: {TIME_STEP}, Recebido: {len(precos)}"}), 400
+
+        # Garante que o input tenha o tamanho exato necessário pelo modelo (TIME_STEP)
+        # Pega os últimos TIME_STEP preços
+        precos_a_processar = np.array(precos[-TIME_STEP:]).reshape(-1, 1)
+
+        # 4. Normalização (Escalonamento)
+        # Simula o escalonamento usado no treinamento do modelo (Max-Min Scaler)
+        min_val = np.min(precos_a_processar)
+        max_val = np.max(precos_a_processar)
         
-        # 2. Predição
-        probabilidade = model_ia.predict(X_pred, verbose=0)[0][0]
+        if max_val == min_val:
+            # Evita divisão por zero se todos os preços forem iguais
+            dados_normalizados = np.zeros_like(precos_a_processar)
+        else:
+            dados_normalizados = (precos_a_processar - min_val) / (max_val - min_val)
+
+        # 5. Formatação para a IA (Adiciona a dimensão de batch)
+        # Formato esperado: (1, TIME_STEP, 1)
+        dados_formatados = dados_normalizados.reshape(1, TIME_STEP, 1)
+
+        # 6. Previsão da IA
+        prediction = model.predict(dados_formatados)
+        # A previsão é um valor entre 0 e 1.
+        prediction_value = prediction[0][0]
+
+        # 7. Tradução do Sinal (Lógica da Aplicação)
+        # O modelo prevê a probabilidade de um movimento.
+        if prediction_value > 0.6:  # Alta confiança na alta (COMPRA)
+            sinal_ia = "BUY"
+        elif prediction_value < 0.4: # Alta confiança na baixa (VENDA)
+            sinal_ia = "SELL"
+        else:
+            sinal_ia = "HOLD" # Indefinido
+
+        # 8. Registro e Resposta
+        signal_time = dados.get('CandleTime', 'N/A')
+        registrar_sinal(dados, float(prediction_value), signal_time)
         
-        sinal = "AGUARDAR"
-        if probabilidade >= THRESHOLD_COMPRA:
-            sinal = "COMPRAR"
-            
-        # 3. LOGA OS DADOS NO SUPABASE (Não bloqueia a resposta da API)
-        timestamp_log = int(historico.iloc[-1]['time']) 
-        log_trade_data(timestamp_log, indicadores_df, probabilidade, sinal)
-        
-        # 4. Retorna o Sinal
+        # Retorna o sinal e a pontuação de confiança da IA
         return jsonify({
-            "sinal": sinal,
-            "probabilidade": round(float(probabilidade), 4)
-        })
-        
+            "Signal": sinal_ia,
+            "Confidence": float(prediction_value) # Garante que seja float serializável
+        }), 200
+
     except Exception as e:
-        print(f"ERRO durante a predição: {e}")
-        return jsonify({"sinal": "ERRO", "mensagem": str(e)}), 500
+        # Em caso de qualquer erro interno
+        print(f"Falha no processamento: {e}")
+        return jsonify({"Error": f"Erro interno ao processar a requisição: {str(e)}"}), 500
+
+# --- Inicialização da Aplicação ---
+
+# O Deta Space executa o main.py.
+# Esta parte é crucial para carregar o modelo e conectar o Supabase ANTES de servir requisições.
+if __name__ != '__main__':
+    # O Deta executa esta parte apenas uma vez durante a inicialização do container
+    inicializar_modelo()
+    inicializar_servicos()
+
+# No Deta, a variável global 'app' é detectada e servida automaticamente.
+# Não precisamos de 'if __name__ == "__main__"' para rodar o servidor.
+
 
