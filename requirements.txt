@@ -2,6 +2,6 @@ Versão 3.10 do Python é fixada em runtime.txt para compatibilidade com TensorF
 tensorflow==2.10.0
 numpy
 pandas
-pandas-ta
+pandas-ta==0.3.14b0
 flask
 supabase
