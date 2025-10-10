@@ -1,0 +1,6 @@
+tensorflow==2.10.0
+numpy
+pandas
+pandas-ta==0.3.14b0
+flask
+supabase
